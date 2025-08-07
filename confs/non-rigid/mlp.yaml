@@ -1,0 +1,47 @@
+# @package _global_
+
+non_rigid_name: mlp
+
+model:
+  deformer:
+    non_rigid:
+      name: mlp
+      scale_offset: logit
+      rot_offset: mult
+
+      delay: 100
+#      delay: 0
+
+      # 偏移量限制参数（默认关闭硬限制，可根据需要启用）
+      enable_displacement_clamp: false  # 是否启用位移限制
+      enable_scale_clamp: false         # 是否启用尺度限制
+      enable_rotation_clamp: false      # 是否启用旋转限制
+      max_displacement: 0.1             # 最大位移限制（米）
+      max_scale_delta: 0.5              # 最大尺度变化限制
+      max_rotation_delta: 0.2           # 最大旋转变化限制
+      use_tanh_clamp: false             # 是否使用tanh平滑限制
+
+      feature_dim: 64
+      latent_dim: 0
+      pose_encoder:
+        num_joints: 24
+        rel_joints: true
+        dim_per_joint: 6
+        out_dim: -1
+      mlp:
+        n_neurons: 512
+        n_hidden_layers: 12
+        skip_in: [ 4, 8 ]
+        cond_in: [ 0 ]
+        multires: 8
+
+        last_layer_init: false
+
+opt:
+#  lambda_nr_xyz: 1e-2
+  lambda_nr_xyz: 1e-4
+#  lambda_nr_scale: 1e-2
+  lambda_nr_scale: 1e-5
+  lambda_nr_rot: 1e-5
+  non_rigid_lr: 5e-4
+  nr_latent_lr: 1e-3

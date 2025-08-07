@@ -1,0 +1,58 @@
+defaults:
+  - _self_
+  - dataset: peoplesnapshot/male-3-casual
+  - deformer: smpl_model
+  - non-rigid: hashgrid
+  
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: "outputs/${dataset.name}-improved-loss"  # 使用改进版输出目录
+
+num_workers: 1
+max_sh_degree: 3
+max_freq: 6
+use_point_color: False
+use_point_displacement: False
+enable_ambient_occlusion: True
+
+# 改进版损失权重配置（默认启用）
+lambda_dssim: 0.2        # SSIM损失权重
+lambda_lpips: 0.1        # 感知损失权重，提升视觉质量
+lambda_edge: 0.05        # 边缘损失权重，保持细节
+lambda_gradient: 0.02    # 梯度损失权重，保持结构
+
+# 非刚性正则化损失权重
+lambda_nr_xyz: 0.001     # 位移正则化权重
+lambda_nr_scale: 0.0001  # 尺度正则化权重
+lambda_nr_rot: 0.0001    # 旋转正则化权重
+
+# 原版配置（已注释，保留备用）
+# lambda_dssim: 0.15
+# lambda_nr_xyz: 0.003     # 位移正则化权重（降低40%）
+# lambda_nr_scale: 0.0003  # 尺度正则化权重（降低40%）
+# lambda_nr_rot: 0.0003    # 旋转正则化权重（降低40%）
+
+training_args:
+  weights_lr: 0.0001
+  joint_lr: 0.001
+  opacity_lr: 0.02
+  scaling_lr: 0.005
+  rotation_lr: 0.001
+  ao_lr: 0.005
+  displacement_lr: 0.005
+  displacement_encoder_lr: 0.001  # 增加位移编码器学习率
+  shs_lr: 0.0025
+  sh_encoder_lr: 0.001
+  non_rigid_lr: 0.001     # HashGrid非刚性模块学习率
+
+trainer_args:
+  max_epochs: 15
+  check_val_every_n_epoch: 3
+
+# 指定使用改进版模型（默认启用）
+model_class: animatableGaussian.model.nerf_model.NeRFModel
+
+# 原版模型配置（已注释，保留备用）
+# model_class: animatableGaussian.model.nerf_model.OriginalNeRFModel
