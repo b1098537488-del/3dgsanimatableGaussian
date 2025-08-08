@@ -17,16 +17,16 @@ use_point_color: False
 use_point_displacement: False
 enable_ambient_occlusion: True
 
-# 改进版损失权重配置（默认启用）
-lambda_dssim: 0.2        # SSIM损失权重
-lambda_lpips: 0.1        # 感知损失权重，提升视觉质量
-lambda_edge: 0.05        # 边缘损失权重，保持细节
-lambda_gradient: 0.02    # 梯度损失权重，保持结构
+# 保守优化版损失权重配置（渐进式调整）
+lambda_dssim: 0.18       # SSIM损失权重，轻微降低
+lambda_lpips: 0.08       # 感知损失权重，降低到保守值
+lambda_edge: 0.03        # 边缘损失权重，降低到保守值
+lambda_gradient: 0.015   # 梯度损失权重，降低到保守值
 
-# 非刚性正则化损失权重
-lambda_nr_xyz: 0.001     # 位移正则化权重
-lambda_nr_scale: 0.0001  # 尺度正则化权重
-lambda_nr_rot: 0.0001    # 旋转正则化权重
+# 非刚性正则化损失权重（保守设置，与hashgrid.yaml保持一致）
+lambda_nr_xyz: 0.0005    # 位移正则化权重，降低约束强度
+lambda_nr_scale: 0.00005 # 尺度正则化权重，降低约束强度
+lambda_nr_rot: 0.00005   # 旋转正则化权重，降低约束强度
 
 # 原版配置（已注释，保留备用）
 # lambda_dssim: 0.15
@@ -35,17 +35,18 @@ lambda_nr_rot: 0.0001    # 旋转正则化权重
 # lambda_nr_rot: 0.0003    # 旋转正则化权重（降低40%）
 
 training_args:
-  weights_lr: 0.0001
-  joint_lr: 0.001
-  opacity_lr: 0.02
-  scaling_lr: 0.005
-  rotation_lr: 0.001
-  ao_lr: 0.005
-  displacement_lr: 0.005
-  displacement_encoder_lr: 0.001  # 增加位移编码器学习率
-  shs_lr: 0.0025
-  sh_encoder_lr: 0.001
-  non_rigid_lr: 0.001     # HashGrid非刚性模块学习率
+  # 保守优化学习率配置
+  weights_lr: 0.00012      # 高斯权重学习率，轻微提升
+  joint_lr: 0.0011         # 关节学习率，轻微增加
+  opacity_lr: 0.022        # 透明度学习率，轻微提升
+  scaling_lr: 0.0055       # 缩放学习率，轻微提升
+  rotation_lr: 0.0011      # 旋转学习率，轻微提升
+  ao_lr: 0.0055            # 环境光遮蔽学习率
+  displacement_lr: 0.0055  # 位移学习率，轻微提升
+  displacement_encoder_lr: 0.0011  # 位移编码器学习率
+  shs_lr: 0.0028           # 球谐函数学习率，轻微提升
+  sh_encoder_lr: 0.0011    # 球谐编码器学习率
+  non_rigid_lr: 0.0011     # HashGrid非刚性模块学习率
 
 trainer_args:
   max_epochs: 15

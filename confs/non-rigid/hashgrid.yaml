@@ -37,10 +37,11 @@ model:
         last_layer_init: false
 
 opt:
-#  lambda_nr_xyz: 1e-2
-  lambda_nr_xyz: 0.
-#  lambda_nr_scale: 1e-4
-  lambda_nr_scale: 0.
-  lambda_nr_rot: 0.
-  non_rigid_lr: 1e-3
-  nr_latent_lr: 1e-3
+  # 保守启用非刚性正则化损失权重
+  lambda_nr_xyz: 0.0005     # 位移正则化权重，降低约束强度
+  lambda_nr_scale: 0.00005  # 尺度正则化权重，降低约束强度
+  lambda_nr_rot: 0.00005    # 旋转正则化权重，降低约束强度
+  
+  # 学习率配置
+  non_rigid_lr: 1e-3        # HashGrid学习率
+  nr_latent_lr: 1e-3        # 潜在变量学习率
