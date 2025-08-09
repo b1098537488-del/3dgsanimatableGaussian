@@ -132,26 +132,38 @@ class SMPLModel(nn.Module):
         self._init_non_rigid()
 
     def _init_non_rigid(self):
-        # 从配置文件加载非刚性变形模块的配置
+        # 获取当前文件的目录
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # 计算项目根目录（向上两级：deformer -> animatableGaussian -> 项目根目录）
+        project_root = os.path.dirname(os.path.dirname(current_dir))
+        
         print("self.non_rigid", self.non_rigid)
         non_rigid_configs = {
-            "mlp": "/root/autodl-tmp/Animatable-3D-Gaussian-master/confs/non-rigid/mlp.yaml",
-            "hannw_mlp": "/root/autodl-tmp/Animatable-3D-Gaussian-master/confs/non-rigid/hannw_mlp.yaml",
-            "hashgrid": "/root/autodl-tmp/Animatable-3D-Gaussian-master/confs/non-rigid/hashgrid.yaml",
-            "identity": "/root/autodl-tmp/Animatable-3D-Gaussian-master/confs/non-rigid/identity.yaml"
+            "mlp": os.path.join(project_root, "confs/non-rigid/mlp.yaml"),
+            "hannw_mlp": os.path.join(project_root, "confs/non-rigid/hannw_mlp.yaml"),
+            "hashgrid": os.path.join(project_root, "confs/non-rigid/hashgrid.yaml"),
+            "identity": os.path.join(project_root, "confs/non-rigid/identity.yaml")
         }
         
         # 根据传入的non_rigid_name选择配置
         config_path = non_rigid_configs.get(self.non_rigid_name, non_rigid_configs["mlp"])
         print(f"Using non-rigid config: {self.non_rigid_name} -> {config_path}")
         
+        # 检查文件是否存在
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        
         with open(config_path, 'r') as file:
             config = yaml.safe_load(file)
         
         # 创建元数据字典
+        # 为时间潜码创建合适的 frame_dict
+        # 假设我们有足够的帧来支持时间插值（例如 100 帧）
+        num_time_frames = 100  # 可以根据实际需要调整
+        frame_dict = {i: i for i in range(num_time_frames)}
         metadata = {
             'aabb': AABB(self.normalized_vertices),  # 使用AABB类包装归一化的顶点
-            'frame_dict': {}  # 如果需要，可以添加帧字典
+            'frame_dict': frame_dict  # 创建包含时间帧的字典
         }
         
         # 初始化非刚性变形模块
@@ -228,11 +240,11 @@ class SMPLModel(nn.Module):
         full_body_pose = torch.cat(
             [global_orient[:, None, :], body_pose], dim=1)
 
-        if self.use_point_displacement:
-            v_displaced = self.v_template + self.displacements
-        else:
-            v_displaced = self.v_template + \
-                self.displacementEncoder(self.normalized_vertices)
+        # if self.use_point_displacement:
+        #     v_displaced = self.v_template + self.displacements
+        # else:
+        #     v_displaced = self.v_template + \
+        #         self.displacementEncoder(self.normalized_vertices)
         v_displaced = self.v_template
         T = lbs(full_body_pose, transl, self.J, self.parents, self.weights)
         
@@ -259,7 +271,14 @@ class SMPLModel(nn.Module):
             def __init__(self, rots, Jtrs, frame_id=None):
                 self.rots = rots
                 self.Jtrs = Jtrs
-                self.frame_id = frame_id
+                # 设置frame_id属性
+                if frame_id is not None:
+                    self.frame_id = frame_id
+                else:
+                    self.frame_id = 0.0
+                    
+            def clone(self):
+                return GaussianObject(self._xyz.clone(), self._scaling.clone(), self._rotation.clone())
         
         # 初始化高斯和相机对象
         gaussians = GaussianObject(
@@ -274,9 +293,18 @@ class SMPLModel(nn.Module):
         # 将旋转矩阵展平为(batch_size, num_joints, 9)的形式
         rot_mats_flat = rot_mats.view(batch_size, num_joints, 9)
         
+        # 计算归一化时间作为frame_id
+        if time is not None and len(time) > 0:
+            # time encoding 的最后一个元素是归一化时间 t ∈ [0, 1]
+            normalized_time = time[-1].item()
+            frame_id = normalized_time  # 直接使用归一化时间作为连续帧ID
+        else:
+            frame_id = 0.0
+        
         camera = CameraObject(
             rots=rot_mats_flat,
-            Jtrs=self.J
+            Jtrs=self.J,
+            frame_id=frame_id
         )
         
         nr_losses = {}

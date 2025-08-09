@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-# import pytorch3d.transforms as tf
+import math  # 添加这行
 from omegaconf import OmegaConf
 import numpy as np
 from animatableGaussian.utils import (HierarchicalPoseEncoder,
@@ -23,7 +23,7 @@ class Identity(NonRigidDeform):
         super().__init__(cfg)  # 调用了 nn.Module 的初始化（通过 super() 逐层向上递归）
 
     def forward(self, gaussians, iteration, camera, compute_loss=True):
-        return gaussians, {}    # {}	空字典，表示无非刚性损失项
+        return gaussians, {}    # {}	空字典，表示非刚性损失项
 
 class MLP(NonRigidDeform):
     def __init__(self, cfg, metadata):
@@ -231,26 +231,28 @@ class HashGridwithMLP(NonRigidDeform):
         self.pose_encoder = HierarchicalPoseEncoder(**cfg.pose_encoder)
         d_cond = self.pose_encoder.n_output_dims
 
-        # add latent code
         self.latent_dim = cfg.get('latent_dim', 0)
         if self.latent_dim > 0:
             d_cond += self.latent_dim
             self.frame_dict = metadata['frame_dict']
             self.latent = nn.Embedding(len(self.frame_dict), self.latent_dim)
 
-        d_out = 3 + 3 + 4
         self.feature_dim = cfg.get('feature_dim', 0)
-        d_out += self.feature_dim
+        d_out_xyz, d_out_scale, d_out_rot = 3, 3, 4
+        d_out_total = d_out_xyz + d_out_scale + d_out_rot + self.feature_dim
 
         self.aabb = metadata['aabb']
         self.hashgrid = HashGrid(cfg.hashgrid)
-        self.mlp = VanillaCondMLP(self.hashgrid.n_output_dims, d_cond, d_out, cfg.mlp)
+        self.mlp = VanillaCondMLP(
+            dim_in=self.hashgrid.n_output_dims,
+            dim_cond=d_cond,
+            dim_out=d_out_total,
+            config=cfg.mlp
+        )
 
         self.delay = cfg.get('delay', 0)
 
     def forward(self, gaussians, iteration, camera, compute_loss=True):
-        # print("---------------iteration--------------------")
-        # print(iteration)
         if iteration < self.delay:
             deformed_gaussians = gaussians.clone()
             if self.feature_dim > 0:
@@ -258,31 +260,44 @@ class HashGridwithMLP(NonRigidDeform):
                         torch.zeros(gaussians.get_xyz.shape[0], self.feature_dim).cuda())
             return deformed_gaussians, {}
 
-        rots = camera.rots
-        Jtrs = camera.Jtrs
+        rots, Jtrs = camera.rots, camera.Jtrs
         pose_feat = self.pose_encoder(rots, Jtrs)
 
         if self.latent_dim > 0:
-            frame_idx = camera.frame_id
-            if frame_idx not in self.frame_dict:
-                latent_idx = len(self.frame_dict) - 1
+            if hasattr(camera, 'time') and camera.time is not None:
+                t_norm = camera.time
+                frame_val = t_norm * (len(self.frame_dict) - 1)
             else:
-                latent_idx = self.frame_dict[frame_idx]
-            latent_idx = torch.Tensor([latent_idx]).long().to(pose_feat.device)
-            latent_code = self.latent(latent_idx)
-            latent_code = latent_code.expand(pose_feat.shape[0], -1)
+                frame_id = camera.frame_id
+                frame_val = float(frame_id) if isinstance(frame_id, (int, float)) else 0.0
+
+            total_frames = len(self.frame_dict)
+            frame_val = max(0.0, min(frame_val, total_frames - 1))
+            lower_idx = int(math.floor(frame_val))
+            upper_idx = min(int(math.ceil(frame_val)), total_frames - 1)
+            alpha = frame_val - lower_idx
+
+            code_lower = self.latent.weight[lower_idx]
+            code_upper = self.latent.weight[upper_idx]
+            latent_code = (1 - alpha) * code_lower + alpha * code_upper
+            latent_code = latent_code.unsqueeze(0).expand(pose_feat.shape[0], -1)
+        else:
+            latent_code = None
+
+        if latent_code is not None:
             pose_feat = torch.cat([pose_feat, latent_code], dim=1)
 
         xyz = gaussians.get_xyz
         xyz_norm = self.aabb.normalize(xyz, sym=True)
-        deformed_gaussians = gaussians.clone()
-        feature = self.hashgrid(xyz_norm)   # 使用的是哈希编码对 xyz 进行编码
+        feature = self.hashgrid(xyz_norm)
         deltas = self.mlp(feature, cond=pose_feat)
 
         delta_xyz = deltas[:, :3]
         delta_scale = deltas[:, 3:6]
         delta_rot = deltas[:, 6:10]
+        delta_feat = deltas[:, 10:] if self.feature_dim > 0 else None
 
+        deformed_gaussians = gaussians.clone()
         deformed_gaussians._xyz = gaussians._xyz + delta_xyz
 
         scale_offset = self.cfg.get('scale_offset', 'logit')
@@ -291,40 +306,35 @@ class HashGridwithMLP(NonRigidDeform):
         elif scale_offset == 'exp':
             deformed_gaussians._scaling = torch.log(torch.clamp_min(gaussians.get_scaling + delta_scale, 1e-6))
         elif scale_offset == 'zero':
-            delta_scale = torch.zeros_like(delta_scale)
             deformed_gaussians._scaling = gaussians._scaling
         else:
-            raise ValueError
+            raise ValueError(f"Unknown scale_offset type: {scale_offset}")
 
         rot_offset = self.cfg.get('rot_offset', 'add')
         if rot_offset == 'add':
             deformed_gaussians._rotation = gaussians._rotation + delta_rot
         elif rot_offset == 'mult':
-            q1 = delta_rot
-            q1[:, 0] = 1.  # [1,0,0,0] represents identity rotation
-            delta_rot = delta_rot[:, 1:]
+            q1 = delta_rot.clone()
+            q1[:, 0] = 1.
             q2 = gaussians._rotation
-            # deformed_gaussians._rotation = quaternion_multiply(q1, q2)
-            # deformed_gaussians._rotation = tf.quaternion_multiply(q1, q2)
+            deformed_gaussians._rotation = quaternion_multiply(q1, q2)
+            deformed_gaussians._rotation = deformed_gaussians._rotation / (
+                deformed_gaussians._rotation.norm(dim=-1, keepdim=True) + 1e-8
+            )
         else:
-            raise ValueError
+            raise ValueError(f"Unknown rot_offset type: {rot_offset}")
 
         if self.feature_dim > 0:
-            setattr(deformed_gaussians, "non_rigid_feature", deltas[:, 10:])
+            setattr(deformed_gaussians, "non_rigid_feature", delta_feat)
 
         if compute_loss:
-            # regularization
-            loss_xyz = torch.norm(delta_xyz, p=2, dim=1).mean()
-            loss_scale = torch.norm(delta_scale, p=1, dim=1).mean()
-            loss_rot = torch.norm(delta_rot, p=1, dim=1).mean()
-            loss_reg = {
-                'nr_xyz': loss_xyz,
-                'nr_scale': loss_scale,
-                'nr_rot': loss_rot
+            return deformed_gaussians, {
+                'nr_xyz': delta_xyz.norm(p=2, dim=1).mean(),
+                'nr_scale': delta_scale.norm(p=1, dim=1).mean(),
+                'nr_rot': delta_rot.norm(p=1, dim=1).mean()
             }
         else:
-            loss_reg = {}
-        return deformed_gaussians, loss_reg
+            return deformed_gaussians, {}
 
 def get_non_rigid_deform(cfg, metadata):
     if isinstance(cfg, dict):

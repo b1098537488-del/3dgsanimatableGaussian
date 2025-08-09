@@ -9,39 +9,35 @@ model:
       scale_offset: logit
       rot_offset: mult
 
-      delay: 3000
+      delay: 1000              # 增加延迟，让基础模型先稳定
 
-      feature_dim: 64
-      latent_dim: 0
+      feature_dim: 32          # 降低特征维度
+      latent_dim: 32
       pose_encoder:
         num_joints: 24
         rel_joints: false
         dim_per_joint: 6
-        out_dim: -1
+        out_dim: 0
 
       hashgrid:
-        n_levels: 16
+        n_levels: 12             # 减少层数
         n_features_per_level: 2
-        log2_hashmap_size: 16
+        log2_hashmap_size: 16    # 回到原始大小
         base_resolution: 16
-        per_level_scale: 1.447269237440378 # max reso 4096
-        max_resolution: 2048
+        per_level_scale: 1.447269237440378
+        max_resolution: 2048     # 降低最大分辨率
 
       mlp:
-        n_neurons: 128
-        n_hidden_layers: 3
-        skip_in: []
-        cond_in: [ 0 ]
-        multires: 0
-
-        last_layer_init: false
+        n_neurons: 128           # 回到原始神经元数
+        n_hidden_layers: 2       # 减少到2层
+        skip_in: []              # 移除跳跃连接
+        cond_in: [0]             # 只在第0层添加条件
+        multires: 0              # 关闭位置编码
+        last_layer_init: true
 
 opt:
-  # 保守启用非刚性正则化损失权重
-  lambda_nr_xyz: 0.0005     # 位移正则化权重，降低约束强度
-  lambda_nr_scale: 0.00005  # 尺度正则化权重，降低约束强度
-  lambda_nr_rot: 0.00005    # 旋转正则化权重，降低约束强度
-  
-  # 学习率配置
-  non_rigid_lr: 1e-3        # HashGrid学习率
-  nr_latent_lr: 1e-3        # 潜在变量学习率
+  lambda_nr_xyz: 0.0002
+  lambda_nr_scale: 0.00002
+  lambda_nr_rot: 0.00002
+  non_rigid_lr: 0.0003
+  nr_latent_lr: 0.0008       # 降低时间潜码学习率

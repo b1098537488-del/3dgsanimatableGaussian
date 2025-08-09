@@ -214,73 +214,124 @@ class HierarchicalPoseEncoder(nn.Module):
         out = self.out_layer(out)
         return out
 
+class FiLM(nn.Module):
+    def __init__(self, cond_dim, hidden_dim):
+        super(FiLM, self).__init__()
+        self.gamma = nn.Linear(cond_dim, hidden_dim)
+        self.beta = nn.Linear(cond_dim, hidden_dim)
+
+    def forward(self, x, cond):
+        gamma = self.gamma(cond)
+        beta = self.beta(cond)
+        return gamma * x + beta
+
+class ResidualFiLMLayer(nn.Module):
+    def __init__(self, input_dim, output_dim, cond_dim, use_film=True):
+        super(ResidualFiLMLayer, self).__init__()
+        self.linear = nn.Linear(input_dim, output_dim)
+        self.use_film = use_film and cond_dim > 0
+        self.use_residual = (input_dim == output_dim)
+        
+        if self.use_film:
+            self.film = FiLM(cond_dim, output_dim)
+        self.act = nn.LeakyReLU()
+
+    def forward(self, x, cond):
+        # 确保输入数据类型与模型参数一致
+        x = x.to(self.linear.weight.dtype)
+        if cond is not None:
+            cond = cond.to(self.linear.weight.dtype)
+            
+        out = self.linear(x)
+        
+        # 应用FiLM调制
+        if self.use_film and cond is not None:
+            out = self.film(out, cond)
+        
+        # 应用激活函数
+        out = self.act(out)
+        
+        # 残差连接（仅当输入输出维度相同时）
+        if self.use_residual:
+            out = x + out
+            
+        return out
+
 class VanillaCondMLP(nn.Module):
-    def __init__(self, dim_in, dim_cond, dim_out, config, dim_coord=3):
+    def __init__(self, dim_in, dim_cond, dim_out, config):
         super(VanillaCondMLP, self).__init__()
 
-        self.n_input_dims = dim_in
-        self.n_output_dims = dim_out
+        self.feature_dim = config.get('feature_dim', 0)
+        self.hidden_dim = config.n_neurons
+        self.num_layers = config.n_hidden_layers
 
-        self.n_neurons, self.n_hidden_layers = config.n_neurons, config.n_hidden_layers
-
-        self.config = config
-        dims = [dim_in] + [self.n_neurons for _ in range(self.n_hidden_layers)] + [dim_out]
-
+        # 位置编码
         self.embed_fn = None
         if config.multires > 0:
+            # 修复导入路径 - 直接使用当前文件中的函数
             embed_fn, input_ch = get_embedder(config.multires, input_dims=dim_in)
             self.embed_fn = embed_fn
-            dims[0] = input_ch
+            dim_in = input_ch
 
-        self.last_layer_init = config.get('last_layer_init', False)
+        # 构建网络层
+        self.layers = nn.ModuleList()
+        for i in range(self.num_layers):
+            in_dim = dim_in if i == 0 else self.hidden_dim
+            self.layers.append(ResidualFiLMLayer(in_dim, self.hidden_dim, dim_cond))
 
-        self.num_layers = len(dims)
+        # 多分支输出层
+        self.out_delta_xyz = nn.Linear(self.hidden_dim, 3)
+        self.out_delta_scale = nn.Linear(self.hidden_dim, 3)
+        self.out_delta_rot = nn.Linear(self.hidden_dim, 4)
+        
+        # 可选的非刚性特征输出
+        if self.feature_dim > 0:
+            self.out_feature = nn.Linear(self.hidden_dim, self.feature_dim)
+        else:
+            self.out_feature = None
 
-        for l in range(0, self.num_layers - 1):
-            if l + 1 in config.skip_in:
-                out_dim = dims[l + 1] - dims[0]
-            else:
-                out_dim = dims[l + 1]
-
-            if l in config.cond_in:
-                lin = nn.Linear(dims[l] + dim_cond, out_dim)
-            else:
-                lin = nn.Linear(dims[l], out_dim)
-
-            if self.last_layer_init and l == self.num_layers - 2:
-                torch.nn.init.normal_(lin.weight, mean=0., std=1e-5)
-                torch.nn.init.constant_(lin.bias, val=0.)
-
-
-            setattr(self, "lin" + str(l), lin)
-
-        self.activation = nn.LeakyReLU()
+        # 初始化最后一层（可选）
+        if config.get('last_layer_init', False):
+            for layer in [self.out_delta_xyz, self.out_delta_scale, self.out_delta_rot]:
+                torch.nn.init.normal_(layer.weight, mean=0., std=1e-5)
+                torch.nn.init.constant_(layer.bias, val=0.)
+            if self.out_feature is not None:
+                torch.nn.init.normal_(self.out_feature.weight, mean=0., std=1e-5)
+                torch.nn.init.constant_(self.out_feature.bias, val=0.)
 
     def forward(self, coords, cond=None):
+        # 确保输入数据类型一致
+        if hasattr(self.layers[0], 'linear'):
+            target_dtype = self.layers[0].linear.weight.dtype
+            coords = coords.to(target_dtype)
+            if cond is not None:
+                cond = cond.to(target_dtype)
+        
+        # 扩展条件向量以匹配批次大小
         if cond is not None:
             cond = cond.expand(coords.shape[0], -1)
 
+        # 位置编码
         if self.embed_fn is not None:
-            coords_embedded = self.embed_fn(coords)
-        else:
-            coords_embedded = coords
+            coords = self.embed_fn(coords)
 
-        x = coords_embedded
-        for l in range(0, self.num_layers - 1):
-            lin = getattr(self, "lin" + str(l))
+        # 前向传播
+        x = coords
+        for layer in self.layers:
+            x = layer(x, cond)
 
-            if l in self.config.cond_in:
-                x = torch.cat([x, cond], 1)
+        # 多分支输出
+        out_xyz = self.out_delta_xyz(x)
+        out_scale = self.out_delta_scale(x)
+        out_rot = self.out_delta_rot(x)
 
-            if l in self.config.skip_in:
-                x = torch.cat([x, coords_embedded], 1) / np.sqrt(2)
+        outputs = [out_xyz, out_scale, out_rot]
+        if self.out_feature is not None:
+            out_feat = self.out_feature(x)
+            outputs.append(out_feat)
 
-            x = lin(x)
+        return torch.cat(outputs, dim=-1)
 
-            if l < self.num_layers - 2:
-                x = self.activation(x)
-
-        return x
 
 class HannwCondMLP(nn.Module):
     def __init__(self, dim_in, dim_cond, dim_out, config, dim_coord=3):
@@ -376,9 +427,9 @@ class HashGrid(nn.Module):
         self.n_input_dims = self.encoding.n_input_dims
 
     def forward(self, x):
-        x = (x + 1.) * 0.5 # [-1, 1] => [0, 1]
-
-        return self.encoding(x)
+        # 确保输入输出都是float32
+        x = x.float()
+        return self.encoding(x).float()
 
 def quaternion_multiply(r, s):
     r0, r1, r2, r3 = r.unbind(-1)
